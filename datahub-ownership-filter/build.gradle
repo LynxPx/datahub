@@ -2,7 +2,7 @@ apply plugin: 'java-library'
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -36,8 +36,8 @@ dependencies {
     testImplementation externalDependency.junitJupiterApi
     testImplementation externalDependency.junitJupiterParams
     testRuntimeOnly externalDependency.junitJupiterEngine
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
     testImplementation externalDependency.mockito
-    testImplementation 'org.mockito:mockito-junit-jupiter:5.20.0'
     testImplementation externalDependency.assertJ
     testCompileOnly externalDependency.lombok
     testAnnotationProcessor externalDependency.lombok
