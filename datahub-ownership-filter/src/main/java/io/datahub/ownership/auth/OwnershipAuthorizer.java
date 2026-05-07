@@ -4,16 +4,29 @@ import com.datahub.authorization.AuthorizationRequest;
 import com.datahub.authorization.AuthorizationResult;
 import com.datahub.authorization.AuthorizerContext;
 import com.datahub.plugins.auth.authorization.Authorizer;
+import com.linkedin.common.Owner;
+import com.linkedin.common.Ownership;
 import com.linkedin.common.urn.Urn;
+import com.linkedin.entity.client.SystemEntityClient;
+import com.linkedin.identity.GroupMembership;
 import io.datahub.ownership.admin.AdminBypass;
+import io.datahubproject.metadata.context.OperationContext;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
 public class OwnershipAuthorizer implements Authorizer {
+
+    /** Key used to pass the {@link SystemEntityClient} via {@link AuthorizerContext#data()}. */
+    public static final String CTX_ENTITY_CLIENT = "entityClient";
+
+    /** Key used to pass the system {@link OperationContext} via {@link AuthorizerContext#data()}. */
+    public static final String CTX_SYSTEM_OP_CONTEXT = "systemOpContext";
 
     private static final Set<String> DEFAULT_GATED_PRIVILEGES = Set.of(
         "VIEW_ENTITY_PAGE", "GET_ENTITY", "VIEW_DATASET_USAGE", "VIEW_DATASET_PROFILE"
@@ -26,7 +39,67 @@ public class OwnershipAuthorizer implements Authorizer {
 
     @Override
     public void init(@Nonnull Map<String, Object> authorizerConfig, @Nonnull AuthorizerContext ctx) {
-        // Wired in Task 10. Setters allow tests to drive behavior in the meantime.
+        SystemEntityClient entityClient =
+            (SystemEntityClient) ctx.data().get(CTX_ENTITY_CLIENT);
+        OperationContext systemOpContext =
+            (OperationContext) ctx.data().get(CTX_SYSTEM_OP_CONTEXT);
+
+        this.ownershipResolver = entityUrn -> {
+            try {
+                Urn urn = Urn.createFromString(entityUrn);
+                var resp = entityClient.getV2(systemOpContext, urn, Set.of("ownership"));
+                if (resp == null || resp.getAspects() == null) return Set.of();
+                var ea = resp.getAspects().get("ownership");
+                if (ea == null) return Set.of();
+                var ownership = new Ownership(ea.getValue().data());
+                Set<String> result = new HashSet<>();
+                for (Owner owner : ownership.getOwners()) {
+                    result.add(owner.getOwner().toString());
+                }
+                return result;
+            } catch (Exception e) {
+                throw new RuntimeException("Ownership lookup failed for " + entityUrn, e);
+            }
+        };
+
+        this.groupsResolver = actor -> {
+            try {
+                var resp = entityClient.getV2(systemOpContext, actor, Set.of("groupMembership"));
+                if (resp == null || resp.getAspects() == null) return List.of();
+                var ea = resp.getAspects().get("groupMembership");
+                if (ea == null) return List.of();
+                var gm = new GroupMembership(ea.getValue().data());
+                List<Urn> result = new ArrayList<>();
+                for (Urn g : gm.getGroups()) {
+                    result.add(g);
+                }
+                return result;
+            } catch (Exception e) {
+                throw new RuntimeException("Group lookup failed for " + actor, e);
+            }
+        };
+
+        this.adminBypass = new AdminBypass(
+            parseUrnCsv((String) authorizerConfig.getOrDefault("adminUserUrns", "urn:li:corpuser:datahub")),
+            parseUrnCsv((String) authorizerConfig.getOrDefault("adminGroupUrns", "urn:li:corpGroup:admins")));
+
+        Object gp = authorizerConfig.get("gatedPrivileges");
+        if (gp instanceof String s && !s.isBlank()) {
+            this.gatedPrivileges = Set.of(s.split(","));
+        }
+    }
+
+    private static Set<Urn> parseUrnCsv(String csv) {
+        if (csv == null || csv.isBlank()) return Set.of();
+        Set<Urn> out = new HashSet<>();
+        for (String s : csv.split(",")) {
+            try {
+                out.add(Urn.createFromString(s.trim()));
+            } catch (Exception ignored) {
+                // Skip malformed URNs
+            }
+        }
+        return out;
     }
 
     void setOwnershipResolver(Function<String, Set<String>> r) {
