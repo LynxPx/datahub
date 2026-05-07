@@ -98,6 +98,11 @@ public class OwnershipFilterConfiguration {
     // ===== The single intercept =====
 
     @Bean
+    public StartupValidator startupValidator(WrapStatus wrapStatus) {
+        return new StartupValidator(wrapStatus);
+    }
+
+    @Bean
     public BeanPostProcessor graphQLEngineWrapper(
             OwnershipInstrumentation ownershipInstrumentation,
             WrapStatus wrapStatus) {
