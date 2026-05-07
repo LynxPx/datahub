@@ -12,6 +12,7 @@ dependencies {
     compileOnly project(':metadata-service:services')
     compileOnly project(':metadata-service:auth-impl')
     compileOnly project(':metadata-auth:auth-api')
+    compileOnly project(':metadata-operation-context')
 
     // graphql-java is provided transitively by datahub-graphql-core
     compileOnly externalDependency.graphqlJava
@@ -32,6 +33,7 @@ dependencies {
     testImplementation project(':metadata-service:services')
     testImplementation project(':metadata-service:auth-impl')
     testImplementation project(':metadata-auth:auth-api')
+    testImplementation project(':metadata-operation-context')
     testImplementation externalDependency.graphqlJava
     testImplementation externalDependency.junitJupiterApi
     testImplementation externalDependency.junitJupiterParams
