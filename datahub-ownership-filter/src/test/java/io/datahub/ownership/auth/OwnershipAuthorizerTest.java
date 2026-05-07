@@ -80,6 +80,29 @@ class OwnershipAuthorizerTest {
     }
 
     @Test
+    void initWithoutEntityClientAbstains() {
+        // Simulate the production case: AuthorizerChainFactory provides an empty ctx.data() map.
+        var ctx = new AuthorizerContext(Map.of(), null);
+
+        OwnershipAuthorizer auth = new OwnershipAuthorizer();
+        auth.init(Map.of(
+            "adminUserUrns", "urn:li:corpuser:datahub",
+            "adminGroupUrns", "urn:li:corpGroup:admins",
+            "gatedPrivileges", "VIEW_ENTITY_PAGE"), ctx);
+
+        // A request that would normally be DENIED (alice is not the owner of anything).
+        AuthorizationRequest req = new AuthorizationRequest(
+            "urn:li:corpuser:alice",
+            "VIEW_ENTITY_PAGE",
+            Optional.of(new EntitySpec("dataset", "urn:li:dataset:(urn:li:dataPlatform:mysql,a.b,PROD)")),
+            Collections.emptyList());
+
+        AuthorizationResult result = auth.authorize(req);
+        assertThat(result.getType()).isEqualTo(AuthorizationResult.Type.ALLOW);
+        assertThat(result.getMessage()).contains("Plugin disabled");
+    }
+
+    @Test
     void initWiresOwnershipFromEntityClient() throws Exception {
         var ownership = new Ownership().setOwners(
             new OwnerArray(

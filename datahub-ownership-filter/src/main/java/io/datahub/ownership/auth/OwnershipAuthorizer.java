@@ -19,14 +19,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.logging.Logger;
 
 public class OwnershipAuthorizer implements Authorizer {
+
+    private static final Logger log = Logger.getLogger(OwnershipAuthorizer.class.getName());
 
     /** Key used to pass the {@link SystemEntityClient} via {@link AuthorizerContext#data()}. */
     public static final String CTX_ENTITY_CLIENT = "entityClient";
 
     /** Key used to pass the system {@link OperationContext} via {@link AuthorizerContext#data()}. */
     public static final String CTX_SYSTEM_OP_CONTEXT = "systemOpContext";
+
+    private static final String DISABLED_REASON =
+        "Plugin disabled — EntityClient not available";
 
     private static final Set<String> DEFAULT_GATED_PRIVILEGES = Set.of(
         "VIEW_ENTITY_PAGE", "GET_ENTITY", "VIEW_DATASET_USAGE", "VIEW_DATASET_PROFILE"
@@ -36,6 +42,8 @@ public class OwnershipAuthorizer implements Authorizer {
     private Function<Urn, List<Urn>> groupsResolver;
     private AdminBypass adminBypass;
     private Set<String> gatedPrivileges = DEFAULT_GATED_PRIVILEGES;
+    /** True when EntityClient/OperationContext were absent at init time; plugin abstains entirely. */
+    private boolean disabledMode = false;
 
     @Override
     public void init(@Nonnull Map<String, Object> authorizerConfig, @Nonnull AuthorizerContext ctx) {
@@ -44,40 +52,50 @@ public class OwnershipAuthorizer implements Authorizer {
         OperationContext systemOpContext =
             (OperationContext) ctx.data().get(CTX_SYSTEM_OP_CONTEXT);
 
-        this.ownershipResolver = entityUrn -> {
-            try {
-                Urn urn = Urn.createFromString(entityUrn);
-                var resp = entityClient.getV2(systemOpContext, urn, Set.of("ownership"));
-                if (resp == null || resp.getAspects() == null) return Set.of();
-                var ea = resp.getAspects().get("ownership");
-                if (ea == null) return Set.of();
-                var ownership = new Ownership(ea.getValue().data());
-                Set<String> result = new HashSet<>();
-                for (Owner owner : ownership.getOwners()) {
-                    result.add(owner.getOwner().toString());
+        if (entityClient == null || systemOpContext == null) {
+            this.disabledMode = true;
+            log.warning("OwnershipAuthorizer: EntityClient/OperationContext not found in "
+                + "AuthorizerContext.data() — direct entity-page ownership checks are DISABLED. "
+                + "Search/browse/lineage filtering via OwnershipInstrumentation is unaffected. "
+                + "To wire entity-page checks, upstream DataHub must populate `entityClient`/"
+                + "`systemOpContext` keys in AuthorizerContext (or this plugin must be re-architected).");
+            // Still wire admin bypass and gated privileges — they don't require EntityClient.
+        } else {
+            this.ownershipResolver = entityUrn -> {
+                try {
+                    Urn urn = Urn.createFromString(entityUrn);
+                    var resp = entityClient.getV2(systemOpContext, urn, Set.of("ownership"));
+                    if (resp == null || resp.getAspects() == null) return Set.of();
+                    var ea = resp.getAspects().get("ownership");
+                    if (ea == null) return Set.of();
+                    var ownership = new Ownership(ea.getValue().data());
+                    Set<String> result = new HashSet<>();
+                    for (Owner owner : ownership.getOwners()) {
+                        result.add(owner.getOwner().toString());
+                    }
+                    return result;
+                } catch (Exception e) {
+                    throw new RuntimeException("Ownership lookup failed for " + entityUrn, e);
                 }
-                return result;
-            } catch (Exception e) {
-                throw new RuntimeException("Ownership lookup failed for " + entityUrn, e);
-            }
-        };
+            };
 
-        this.groupsResolver = actor -> {
-            try {
-                var resp = entityClient.getV2(systemOpContext, actor, Set.of("groupMembership"));
-                if (resp == null || resp.getAspects() == null) return List.of();
-                var ea = resp.getAspects().get("groupMembership");
-                if (ea == null) return List.of();
-                var gm = new GroupMembership(ea.getValue().data());
-                List<Urn> result = new ArrayList<>();
-                for (Urn g : gm.getGroups()) {
-                    result.add(g);
+            this.groupsResolver = actor -> {
+                try {
+                    var resp = entityClient.getV2(systemOpContext, actor, Set.of("groupMembership"));
+                    if (resp == null || resp.getAspects() == null) return List.of();
+                    var ea = resp.getAspects().get("groupMembership");
+                    if (ea == null) return List.of();
+                    var gm = new GroupMembership(ea.getValue().data());
+                    List<Urn> result = new ArrayList<>();
+                    for (Urn g : gm.getGroups()) {
+                        result.add(g);
+                    }
+                    return result;
+                } catch (Exception e) {
+                    throw new RuntimeException("Group lookup failed for " + actor, e);
                 }
-                return result;
-            } catch (Exception e) {
-                throw new RuntimeException("Group lookup failed for " + actor, e);
-            }
-        };
+            };
+        }
 
         this.adminBypass = new AdminBypass(
             parseUrnCsv((String) authorizerConfig.getOrDefault("adminUserUrns", "urn:li:corpuser:datahub")),
@@ -120,6 +138,9 @@ public class OwnershipAuthorizer implements Authorizer {
 
     @Override
     public AuthorizationResult authorize(@Nonnull AuthorizationRequest request) {
+        if (disabledMode) {
+            return new AuthorizationResult(request, AuthorizationResult.Type.ALLOW, DISABLED_REASON);
+        }
         if (!gatedPrivileges.contains(request.getPrivilege())) {
             return new AuthorizationResult(request, AuthorizationResult.Type.ALLOW, "Not ownership-gated");
         }
