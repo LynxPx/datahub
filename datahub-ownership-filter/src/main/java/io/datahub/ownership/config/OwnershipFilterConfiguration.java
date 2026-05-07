@@ -103,14 +103,20 @@ public class OwnershipFilterConfiguration {
     }
 
     @Bean
-    public BeanPostProcessor graphQLEngineWrapper(
-            OwnershipInstrumentation ownershipInstrumentation,
-            WrapStatus wrapStatus) {
+    public static BeanPostProcessor graphQLEngineWrapper(
+            org.springframework.beans.factory.ObjectProvider<OwnershipInstrumentation> ownershipInstrumentationProvider,
+            org.springframework.beans.factory.ObjectProvider<WrapStatus> wrapStatusProvider) {
         return new BeanPostProcessor() {
             @Override
             public Object postProcessAfterInitialization(Object bean, String beanName) {
                 if (!"graphQLEngine".equals(beanName)) return bean;
                 try {
+                    // Lazy-resolve our beans only when the graphQLEngine bean is actually being
+                    // post-processed. This prevents eager creation of our deps (and the entire
+                    // bean graph behind them) before infrastructure beans like metrics are ready.
+                    OwnershipInstrumentation ownershipInstrumentation = ownershipInstrumentationProvider.getObject();
+                    WrapStatus wrapStatus = wrapStatusProvider.getObject();
+
                     // Read the existing GraphQL via the public getter — no reflection needed.
                     GraphQL original = invokeGetGraphQL(bean);
                     Instrumentation existing = original.getInstrumentation();
