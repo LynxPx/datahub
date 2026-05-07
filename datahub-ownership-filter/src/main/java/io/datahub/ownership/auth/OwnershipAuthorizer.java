@@ -113,8 +113,8 @@ public class OwnershipAuthorizer implements Authorizer {
         for (String s : csv.split(",")) {
             try {
                 out.add(Urn.createFromString(s.trim()));
-            } catch (Exception ignored) {
-                // Skip malformed URNs
+            } catch (Exception e) {
+                log.warning("OwnershipAuthorizer: ignoring malformed URN " + s.trim() + ": " + e.getMessage());
             }
         }
         return out;

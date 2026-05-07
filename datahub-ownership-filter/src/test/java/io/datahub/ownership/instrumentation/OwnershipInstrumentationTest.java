@@ -23,6 +23,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -109,6 +110,27 @@ class OwnershipInstrumentationTest {
         wrapped.get(envFor(datahub, baseInput()));
 
         assertThat(seen.get().get("orFilters")).isNull();
+    }
+
+    @Test
+    void propagatesGroupResolverException() throws Exception {
+        RuntimeException boom = new RuntimeException("group service unavailable");
+        CachedGroupResolver failingGroups = mock(CachedGroupResolver.class);
+        when(failingGroups.groupsFor(any(), any())).thenThrow(boom);
+
+        OwnershipInstrumentation inst = new OwnershipInstrumentation(
+                new OwnershipFilterBuilder(), new FieldArgumentMutators(), failingGroups, admins);
+
+        DataFetcher<?> wrapped = inst.instrumentDataFetcher(
+                env -> "should not be called",
+                fieldFetchParams("searchAcrossEntities"),
+                null);
+
+        // Fail-closed: group-service outage propagates as an exception rather than
+        // silently allowing unfiltered access.
+        assertThatThrownBy(() -> wrapped.get(envFor(alice, baseInput())))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("group service unavailable");
     }
 
     // ----- Helpers -----

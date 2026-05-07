@@ -61,6 +61,8 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
         }
 
         Urn actor = Urn.createFromString(qc.getActorUrn());
+        // Intentionally not caught: fail-closed. A transient group-service outage surfaces as
+        // a GraphQL error rather than silently granting unfiltered access.
         List<Urn> groups = groupResolver.groupsFor(qc.getOperationContext(), actor);
 
         if (adminBypass.isAdmin(actor, groups)) {
@@ -78,7 +80,7 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
 
         List<String> groupStrings = groups.stream().map(Urn::toString).toList();
         List<Map<String, Object>> ownershipFilter =
-                filterBuilder.injectOwnershipFilter(null, actor.toString(), groupStrings);
+                filterBuilder.injectOwnershipFilter(actor.toString(), groupStrings);
 
         mutators.applyOwnershipFilter(fieldName, input, ownershipFilter);
 
