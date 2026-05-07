@@ -1,0 +1,52 @@
+apply plugin: 'java-library'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Wrapped DataHub services — compileOnly so we don't drag GMS into our jar.
+    compileOnly project(':datahub-graphql-core')
+    compileOnly project(':metadata-service:services')
+    compileOnly project(':metadata-service:restli-client-api')
+    compileOnly project(':metadata-service:auth-impl')
+    compileOnly project(':metadata-auth:auth-api')
+    compileOnly project(':metadata-operation-context')
+
+    // graphql-java is provided transitively by datahub-graphql-core
+    compileOnly externalDependency.graphqlJava
+
+    // Spring (provided by GMS at runtime)
+    compileOnly externalDependency.springContext
+    compileOnly externalDependency.springBeans
+    compileOnly externalDependency.springBoot
+
+    compileOnly externalDependency.slf4jApi
+
+    compileOnly externalDependency.lombok
+    annotationProcessor externalDependency.lombok
+
+    implementation externalDependency.caffeine
+
+    testImplementation project(':datahub-graphql-core')
+    testImplementation project(':metadata-service:services')
+    testImplementation project(':metadata-service:restli-client-api')
+    testImplementation project(':metadata-service:auth-impl')
+    testImplementation project(':metadata-auth:auth-api')
+    testImplementation project(':metadata-operation-context')
+    testImplementation externalDependency.graphqlJava
+    testImplementation externalDependency.junitJupiterApi
+    testImplementation externalDependency.junitJupiterParams
+    testRuntimeOnly externalDependency.junitJupiterEngine
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
+    testImplementation externalDependency.mockito
+    testImplementation externalDependency.assertJ
+    testCompileOnly externalDependency.lombok
+    testAnnotationProcessor externalDependency.lombok
+}
+
+test {
+    useJUnitPlatform()
+}
