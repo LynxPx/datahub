@@ -1,11 +1,15 @@
 package io.datahub.ownership.config;
 
+import com.datahub.authentication.AuthenticationConfiguration;
+import com.datahub.authentication.AuthenticatorConfiguration;
 import com.datahub.authentication.group.GroupService;
 import com.linkedin.common.urn.Urn;
+import com.linkedin.gms.factory.config.ConfigurationProvider;
 import graphql.GraphQL;
 import graphql.execution.instrumentation.ChainedInstrumentation;
 import graphql.execution.instrumentation.Instrumentation;
 import io.datahub.ownership.admin.AdminBypass;
+import io.datahub.ownership.auth.KeycloakJwtAuthenticator;
 import io.datahub.ownership.filter.OwnershipFilterBuilder;
 import io.datahub.ownership.group.CachedGroupResolver;
 import io.datahub.ownership.instrumentation.FieldArgumentMutators;
@@ -18,9 +22,12 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -153,6 +160,63 @@ public class OwnershipFilterConfiguration {
                 }
                 throw new NoSuchFieldException("No graphql.GraphQL field found on " + cls.getName()
                         + " or any of its superclasses");
+            }
+        };
+    }
+
+    // ===== Keycloak JWT authenticator registration =====
+
+    /**
+     * Registers {@link KeycloakJwtAuthenticator} into DataHub's authenticator chain by appending a
+     * config entry to {@link ConfigurationProvider}'s authentication list. The chain is built later,
+     * in the auth filter's {@code @PostConstruct}, so the entry we add here is picked up natively
+     * (our module is on the GMS classpath). This avoids editing the baked {@code application.yaml}.
+     *
+     * <p>Inert unless {@code KEYCLOAK_JWKS_URI} is set, so the build ships safely disabled by default.
+     */
+    @Bean
+    public static BeanPostProcessor keycloakAuthenticatorRegistrar(
+            @Value("${KEYCLOAK_JWKS_URI:}") String jwksUri,
+            @Value("${KEYCLOAK_TRUSTED_ISSUERS:}") String trustedIssuers,
+            @Value("${KEYCLOAK_ALLOWED_AUDIENCES:}") String allowedAudiences,
+            @Value("${KEYCLOAK_USER_CLAIM:email}") String userClaim) {
+        return new BeanPostProcessor() {
+            @Override
+            public Object postProcessAfterInitialization(Object bean, String beanName) {
+                if (!"configurationProvider".equals(beanName) || !(bean instanceof ConfigurationProvider cp)) {
+                    return bean;
+                }
+                if (jwksUri == null || jwksUri.isBlank()) {
+                    log.info("KEYCLOAK_JWKS_URI not set; Keycloak JWT authenticator NOT registered");
+                    return bean;
+                }
+                AuthenticationConfiguration authConfig = cp.getAuthentication();
+                List<AuthenticatorConfiguration> existing = authConfig.getAuthenticators();
+                List<AuthenticatorConfiguration> updated =
+                        existing == null ? new ArrayList<>() : new ArrayList<>(existing);
+
+                AuthenticatorConfiguration ours = new AuthenticatorConfiguration();
+                ours.setType(KeycloakJwtAuthenticator.class.getName());
+                Map<String, Object> configs = new LinkedHashMap<>();
+                configs.put("jwksUri", jwksUri);
+                if (trustedIssuers != null && !trustedIssuers.isBlank()) {
+                    configs.put("trustedIssuers", trustedIssuers);
+                }
+                if (allowedAudiences != null && !allowedAudiences.isBlank()) {
+                    configs.put("allowedAudiences", allowedAudiences);
+                }
+                configs.put("userClaim", userClaim);
+                ours.setConfigs(configs);
+
+                // Insert right after the primary DataHubTokenAuthenticator (index 0) so our
+                // authenticator runs before Health/OAuth/Guest, while DataHub's own tokens are
+                // still validated first and short-circuit before reaching us.
+                int insertAt = updated.isEmpty() ? 0 : 1;
+                updated.add(insertAt, ours);
+                authConfig.setAuthenticators(updated);
+                log.info("Registered KeycloakJwtAuthenticator at chain position {} (jwksUri={}, userClaim={})",
+                        insertAt, jwksUri, userClaim);
+                return bean;
             }
         };
     }

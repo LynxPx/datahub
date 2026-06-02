@@ -24,6 +24,11 @@ still exists in the new version; if not, update the corresponding wrapper.
 | `com.linkedin.entity.client.SystemEntityClient.getV2(...)` | `OwnershipAuthorizer.init` | method signature |
 | `com.linkedin.common.Ownership` PDL aspect | `OwnershipAuthorizer` | PDL schema |
 | `com.linkedin.identity.GroupMembership` PDL aspect | `OwnershipAuthorizer` | PDL schema |
+| `com.datahub.plugins.auth.authentication.Authenticator` interface | `KeycloakJwtAuthenticator` | full interface contract |
+| `com.datahub.authentication.{Authentication,Actor,ActorType,AuthenticationRequest}` | `KeycloakJwtAuthenticator` | constructors / accessors |
+| `com.linkedin.gms.factory.config.ConfigurationProvider` (Spring bean `configurationProvider`) | `keycloakAuthenticatorRegistrar` BeanPostProcessor | Bean-name + `getAuthentication()` |
+| `com.datahub.authentication.{AuthenticationConfiguration,AuthenticatorConfiguration}` | registrar BeanPostProcessor | `getAuthenticators()/setAuthenticators()` + `setType/setConfigs` |
+| `io.jsonwebtoken:jjwt 0.11.2` (`Jwts.parserBuilder`, `SigningKeyResolver`) | `KeycloakJwtAuthenticator`, `JwksSigningKeyResolver` | library API (0.12.x removed these — pin/verify on upgrade) |
 
 ## GraphQL field names (DataHub schema — stable contract)
 

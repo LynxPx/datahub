@@ -48,6 +48,26 @@ via the public `getGraphQL()` getter, wraps the existing `Instrumentation` in a
 `StartupValidator` then asserts at startup that the wrap succeeded; GMS refuses to boot if it did
 not.
 
+### Authentication — plain JWT / Keycloak (optional)
+
+`KeycloakJwtAuthenticator` lets DataHub accept a plain RS256 JWT minted by an external IdP
+(Keycloak by default) **in addition to** DataHub's own access tokens. It validates the token's
+signature against the IdP's JWKS endpoint (matching the token `kid`, with key caching), checks
+issuer/audience/expiry, and maps a configurable claim (default `email`) to a DataHub corpuser
+(`urn:li:corpuser:<email>`). On any token it can't positively validate it returns `null`, so the
+authenticator chain falls through and DataHub's own `DataHubTokenAuthenticator` continues to handle
+DataHub tokens unchanged.
+
+It is registered into DataHub's authenticator chain (right after `DataHubTokenAuthenticator`) by a
+`BeanPostProcessor` in `OwnershipFilterConfiguration` that appends an entry to
+`ConfigurationProvider.getAuthentication().getAuthenticators()` before the auth filter's
+`@PostConstruct` builds the chain — so no `application.yaml` edit is needed. It is **inert unless
+`KEYCLOAK_JWKS_URI` is set**.
+
+Because the ownership filter reads the actor from `QueryContext` (populated by whichever
+authenticator succeeded), filtering applies automatically to JWT-authenticated actors with no extra
+wiring. jjwt 0.11.2 (on the GMS classpath) does the JWT parsing/verification.
+
 ### Entity-page direct access (currently disabled)
 
 `OwnershipAuthorizer` is a DataHub Authorizer plugin skeleton that was intended to enforce
@@ -87,6 +107,18 @@ On every DataHub version bump: run `SchemaContractTest` and review INTERFACES.md
 | `ownership.filter.adminGroupUrns` | `urn:li:corpGroup:admins` | Comma-separated group URNs whose members bypass the filter |
 
 Invalid URNs in these properties cause a `RuntimeException` at startup.
+
+### Keycloak / plain-JWT authentication (env vars)
+
+The `KeycloakJwtAuthenticator` is registered only when `KEYCLOAK_JWKS_URI` is set; otherwise the
+plugin logs a notice and leaves the authenticator chain unchanged.
+
+| Env var | Default | Description |
+|---|---|---|
+| `KEYCLOAK_JWKS_URI` | _(unset → disabled)_ | IdP JWKS endpoint, e.g. `https://<kc>/realms/<realm>/protocol/openid-connect/certs` |
+| `KEYCLOAK_TRUSTED_ISSUERS` | _(none)_ | Comma-separated allowed `iss` values; if set, the token issuer must match |
+| `KEYCLOAK_ALLOWED_AUDIENCES` | _(none)_ | Comma-separated allowed `aud` values; if set, the token audience must intersect |
+| `KEYCLOAK_USER_CLAIM` | `email` | JWT claim whose value becomes the corpuser id (`urn:li:corpuser:<value>`) |
 
 ### Authorizer plugin config (`src/main/resources/config.yml`)
 
