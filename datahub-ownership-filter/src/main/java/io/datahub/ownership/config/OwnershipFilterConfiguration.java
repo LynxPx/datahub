@@ -5,9 +5,11 @@ import com.datahub.authentication.AuthenticatorConfiguration;
 import com.datahub.authentication.group.GroupService;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.gms.factory.config.ConfigurationProvider;
+import com.linkedin.metadata.search.EntitySearchService;
 import graphql.GraphQL;
 import graphql.execution.instrumentation.ChainedInstrumentation;
 import graphql.execution.instrumentation.Instrumentation;
+import io.datahub.ownership.access.DomainPlatformAccessResolver;
 import io.datahub.ownership.admin.AdminBypass;
 import io.datahub.ownership.auth.KeycloakJwtAuthenticator;
 import io.datahub.ownership.filter.OwnershipFilterBuilder;
@@ -77,12 +79,18 @@ public class OwnershipFilterConfiguration {
     }
 
     @Bean
+    public DomainPlatformAccessResolver domainPlatformAccessResolver(EntitySearchService entitySearchService) {
+        return new DomainPlatformAccessResolver(entitySearchService);
+    }
+
+    @Bean
     public OwnershipInstrumentation ownershipInstrumentation(
             OwnershipFilterBuilder builder,
             FieldArgumentMutators mutators,
             CachedGroupResolver groups,
-            AdminBypass admins) {
-        return new OwnershipInstrumentation(builder, mutators, groups, admins);
+            AdminBypass admins,
+            DomainPlatformAccessResolver accessResolver) {
+        return new OwnershipInstrumentation(builder, mutators, groups, admins, accessResolver);
     }
 
     @Bean

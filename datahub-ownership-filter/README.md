@@ -12,19 +12,32 @@ and all 10 gated GraphQL Query fields present. The module also builds unchanged 
 
 ## Visibility rules
 
-An actor may see an asset when **any** of these hold:
+**Assets** (datasets, dashboards, charts, jobs, ML entities, containers, …) — an actor may see an
+asset when **any** of these hold:
 
 1. **They own it** — `owners` contains the actor's URN or one of their group URNs.
-2. **Nobody owns it** — the `owners` field is absent or empty. Unowned assets (datasets, topics,
-   dashboards, etc. with no ownership assigned) are visible to **all** users. Implemented as a
-   second disjunct in the ownership predicate using `condition: EXISTS, negated: true`.
-3. **It is a navigational/structural entity** — Domains, Data Platforms (+ instances), Glossary
-   Terms/Nodes, and Tags are never ownership-gated. Queries scoped exclusively to these types skip
-   filter injection entirely, so domain/platform cards, pickers, and search results always render.
-   (The home page domain/platform *cards* are powered by `listRecommendations`, which the plugin
-   does not intercept; this rule covers the search / browse / govern surfaces that *are* gated.)
+2. **Nobody owns it** — the `owners` field is absent or empty. Unowned assets are visible to **all**
+   users. Implemented as a second disjunct in the ownership predicate using
+   `condition: EXISTS, negated: true`.
 
-Admins (configurable user/group URN allowlists) bypass all of the above.
+**Domains & Data Platforms** are not gated by their own (non-existent) ownership; they are
+**access-scoped**: an actor sees a domain/platform only if it contains at least one asset the actor
+can see (per the asset rules above). This is computed per actor by aggregating the `domains` /
+`platform` facets over the actor's visible assets (`DomainPlatformAccessResolver`, cached ~60s) and
+enforced everywhere they appear:
+
+- **Domain/platform search** (`searchAcrossEntities(types:[DOMAIN])`, the Govern → Domains page,
+  domain/platform pickers): the query is restricted to `urn IN <accessible set>`.
+- **Home-page cards** (`listRecommendations`): the Domains/Platforms module content is post-filtered
+  to drop entries outside the accessible set.
+
+**Glossary Terms/Nodes and Tags** are navigational and remain visible to all users.
+
+**Admins** (configurable user/group URN allowlists) bypass all of the above.
+
+> Known residual: a global/all-entity search (no entity-type scope) can still surface a domain or
+> platform *entity* via the unowned branch, since that path uses the asset filter. The dedicated
+> domain/platform surfaces above are fully scoped.
 
 ## How it works
 

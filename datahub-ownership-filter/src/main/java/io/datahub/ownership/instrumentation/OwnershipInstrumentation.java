@@ -2,12 +2,18 @@ package io.datahub.ownership.instrumentation;
 
 import com.linkedin.common.urn.Urn;
 import com.linkedin.datahub.graphql.QueryContext;
+import com.linkedin.datahub.graphql.generated.Entity;
+import com.linkedin.datahub.graphql.generated.EntityType;
+import com.linkedin.datahub.graphql.generated.ListRecommendationsResult;
+import com.linkedin.datahub.graphql.generated.RecommendationContent;
+import com.linkedin.datahub.graphql.generated.RecommendationModule;
 import graphql.execution.instrumentation.InstrumentationState;
 import graphql.execution.instrumentation.SimplePerformantInstrumentation;
 import graphql.execution.instrumentation.parameters.InstrumentationFieldFetchParameters;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
 import graphql.schema.DataFetchingEnvironmentImpl;
+import io.datahub.ownership.access.DomainPlatformAccessResolver;
 import io.datahub.ownership.admin.AdminBypass;
 import io.datahub.ownership.filter.OwnershipFilterBuilder;
 import io.datahub.ownership.group.CachedGroupResolver;
@@ -17,44 +23,58 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
 
     private static final Logger log = LoggerFactory.getLogger(OwnershipInstrumentation.class);
 
+    private static final String LIST_RECOMMENDATIONS = "listRecommendations";
+
+    /** Navigational types that are visible to everyone, always (not ownership- or access-gated). */
+    private static final Set<String> EXEMPT_TYPES = Set.of("GLOSSARY_TERM", "GLOSSARY_NODE", "TAG");
+
+    private static final Set<String> DOMAIN_TYPES = Set.of("DOMAIN");
+    private static final Set<String> PLATFORM_TYPES = Set.of("DATA_PLATFORM", "DATA_PLATFORM_INSTANCE");
+
     /**
-     * Navigational / structural entity types that are NOT ownership-gated. When a query is scoped
-     * exclusively to these types we skip filter injection entirely, so domain, platform, glossary,
-     * and tag cards / pickers / search results always render regardless of who owns what. Data
-     * assets (datasets, dashboards, charts, jobs, ML entities, containers, …) are still filtered;
-     * unowned ones become visible to everyone via the no-owners branch of the ownership predicate.
+     * Domain/platform types: not ownership-gated on their own (they have no owners), but ACCESS-gated
+     * — an actor only sees a domain/platform that contains at least one asset they can view.
      */
-    private static final Set<String> STRUCTURAL_ENTITY_TYPES = Set.of(
-        "DOMAIN",
-        "DATA_PLATFORM",
-        "DATA_PLATFORM_INSTANCE",
-        "GLOSSARY_TERM",
-        "GLOSSARY_NODE",
-        "TAG");
+    private static final Set<String> ACCESS_SCOPED_TYPES;
+
+    static {
+        Set<String> s = new HashSet<>(DOMAIN_TYPES);
+        s.addAll(PLATFORM_TYPES);
+        ACCESS_SCOPED_TYPES = Set.copyOf(s);
+    }
+
+    /** Never-matching sentinel so an empty accessible set yields zero results (not "all"). */
+    private static final String NO_MATCH_URN = "urn:li:domain:__ownership_filter_no_match__";
 
     private final OwnershipFilterBuilder filterBuilder;
     private final FieldArgumentMutators mutators;
     private final CachedGroupResolver groupResolver;
     private final AdminBypass adminBypass;
+    private final DomainPlatformAccessResolver accessResolver;
 
     public OwnershipInstrumentation(
             @Nonnull OwnershipFilterBuilder filterBuilder,
             @Nonnull FieldArgumentMutators mutators,
             @Nonnull CachedGroupResolver groupResolver,
-            @Nonnull AdminBypass adminBypass) {
+            @Nonnull AdminBypass adminBypass,
+            @Nonnull DomainPlatformAccessResolver accessResolver) {
         this.filterBuilder = filterBuilder;
         this.mutators = mutators;
         this.groupResolver = groupResolver;
         this.adminBypass = adminBypass;
+        this.accessResolver = accessResolver;
     }
 
     @Override
@@ -63,7 +83,7 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
             InstrumentationFieldFetchParameters parameters,
             @Nullable InstrumentationState state) {
         String fieldName = parameters.getExecutionStepInfo().getFieldDefinition().getName();
-        if (!mutators.isOwnershipGated(fieldName)) {
+        if (!mutators.isOwnershipGated(fieldName) && !LIST_RECOMMENDATIONS.equals(fieldName)) {
             return dataFetcher;
         }
         return env -> intercept(dataFetcher, env, fieldName);
@@ -86,6 +106,17 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
             return original.get(env);
         }
 
+        // Home-page recommendation cards: filter out domain/platform cards the actor can't access.
+        if (LIST_RECOMMENDATIONS.equals(fieldName)) {
+            DomainPlatformAccessResolver.AccessSets access =
+                    accessResolver.resolve(qc.getOperationContext(), actor, groups);
+            Object result = original.get(env);
+            if (result instanceof CompletableFuture<?> future) {
+                return future.thenApply(r -> filterRecommendations(r, access));
+            }
+            return filterRecommendations(result, access);
+        }
+
         Object inputObj = env.getArgument("input");
         if (!(inputObj instanceof Map)) {
             log.warn("OwnershipInstrumentation: field {} has no Map 'input' arg; passing through", fieldName);
@@ -95,17 +126,31 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
         @SuppressWarnings("unchecked")
         Map<String, Object> input = new LinkedHashMap<>((Map<String, Object>) inputObj);
 
-        // Navigational entity types (domains, platforms, glossary, tags) are not ownership-gated.
-        // If the query targets only those, leave it untouched so the cards/results still render.
-        if (isStructuralOnly(input)) {
+        List<String> types = requestedTypes(input);
+
+        // Glossary/tags: always visible.
+        if (!types.isEmpty() && EXEMPT_TYPES.containsAll(types)) {
             return original.get(env);
         }
 
-        List<String> groupStrings = groups.stream().map(Urn::toString).toList();
-        List<Map<String, Object>> ownershipFilter =
-                filterBuilder.injectOwnershipFilter(actor.toString(), groupStrings);
-
-        mutators.applyOwnershipFilter(fieldName, input, ownershipFilter);
+        if (!types.isEmpty() && ACCESS_SCOPED_TYPES.containsAll(types)) {
+            // Domain/platform search: restrict to the URNs the actor can access.
+            DomainPlatformAccessResolver.AccessSets access =
+                    accessResolver.resolve(qc.getOperationContext(), actor, groups);
+            Set<String> allowed = new HashSet<>();
+            if (types.stream().anyMatch(DOMAIN_TYPES::contains)) {
+                allowed.addAll(access.domains());
+            }
+            if (types.stream().anyMatch(PLATFORM_TYPES::contains)) {
+                allowed.addAll(access.platforms());
+            }
+            mutators.applyOwnershipFilter(fieldName, input, urnPredicate(allowed));
+        } else {
+            // Assets (or unscoped queries): inject the owners-or-unowned predicate.
+            List<String> groupStrings = groups.stream().map(Urn::toString).toList();
+            mutators.applyOwnershipFilter(fieldName, input,
+                    filterBuilder.injectOwnershipFilter(actor.toString(), groupStrings));
+        }
 
         Map<String, Object> newArgs = new LinkedHashMap<>(env.getArguments());
         newArgs.put("input", input);
@@ -118,16 +163,53 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
         return original.get(mutatedEnv);
     }
 
-    /**
-     * Returns true when the request is scoped to entity types that are ALL structural/navigational
-     * (so ownership filtering should be skipped). Reads {@code types} (a list, used by
-     * searchAcrossEntities, aggregateAcrossEntities, autoCompleteForMultiple, …) and {@code type}
-     * (a single value, used by autoComplete, browse, browseV2, search).
-     *
-     * <p>Returns false when no entity type is specified — an unscoped query spans data assets and
-     * must be filtered.
-     */
-    private boolean isStructuralOnly(@Nonnull Map<String, Object> input) {
+    /** Single-disjunct predicate: {@code urn IN [allowed]} (sentinel when empty so nothing matches). */
+    private List<Map<String, Object>> urnPredicate(Set<String> allowedUrns) {
+        List<String> values = allowedUrns.isEmpty() ? List.of(NO_MATCH_URN) : new ArrayList<>(allowedUrns);
+        Map<String, Object> crit = new LinkedHashMap<>();
+        crit.put("field", "urn");
+        crit.put("condition", "EQUAL");
+        crit.put("values", values);
+        Map<String, Object> disjunct = new LinkedHashMap<>();
+        disjunct.put("and", new ArrayList<>(List.of(crit)));
+        return new ArrayList<>(List.of(disjunct));
+    }
+
+    @Nullable
+    private Object filterRecommendations(Object result, DomainPlatformAccessResolver.AccessSets access) {
+        if (!(result instanceof ListRecommendationsResult recs) || recs.getModules() == null) {
+            return result;
+        }
+        for (RecommendationModule module : recs.getModules()) {
+            List<RecommendationContent> content = module.getContent();
+            if (content == null) {
+                continue;
+            }
+            List<RecommendationContent> kept = content.stream()
+                    .filter(c -> isVisible(c.getEntity(), access))
+                    .collect(Collectors.toList());
+            module.setContent(kept);
+        }
+        return recs;
+    }
+
+    /** Domain/platform recommendation entities are kept only if accessible; other entities pass. */
+    private boolean isVisible(@Nullable Entity entity, DomainPlatformAccessResolver.AccessSets access) {
+        if (entity == null || entity.getType() == null) {
+            return true;
+        }
+        EntityType type = entity.getType();
+        if (type == EntityType.DOMAIN) {
+            return access.domains().contains(entity.getUrn());
+        }
+        if (type == EntityType.DATA_PLATFORM || type == EntityType.DATA_PLATFORM_INSTANCE) {
+            return access.platforms().contains(entity.getUrn());
+        }
+        return true;
+    }
+
+    /** Reads {@code types} (list) and {@code type} (single) entity-type args from the input. */
+    private List<String> requestedTypes(@Nonnull Map<String, Object> input) {
         List<String> types = new ArrayList<>();
         Object typesObj = input.get("types");
         if (typesObj instanceof List<?> list) {
@@ -139,14 +221,6 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
         if (typeObj != null) {
             types.add(String.valueOf(typeObj));
         }
-        if (types.isEmpty()) {
-            return false;
-        }
-        for (String t : types) {
-            if (!STRUCTURAL_ENTITY_TYPES.contains(t)) {
-                return false;
-            }
-        }
-        return true;
+        return types;
     }
 }

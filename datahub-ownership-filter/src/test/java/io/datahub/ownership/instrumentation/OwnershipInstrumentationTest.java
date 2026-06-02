@@ -10,6 +10,7 @@ import graphql.schema.DataFetchingEnvironment;
 import graphql.schema.DataFetchingEnvironmentImpl;
 import graphql.schema.GraphQLFieldDefinition;
 import io.datahubproject.metadata.context.OperationContext;
+import io.datahub.ownership.access.DomainPlatformAccessResolver;
 import io.datahub.ownership.admin.AdminBypass;
 import io.datahub.ownership.filter.OwnershipFilterBuilder;
 import io.datahub.ownership.group.CachedGroupResolver;
@@ -37,6 +38,7 @@ class OwnershipInstrumentationTest {
 
     private CachedGroupResolver groups;
     private AdminBypass admins;
+    private DomainPlatformAccessResolver accessResolver;
     private OwnershipInstrumentation instrumentation;
 
     static Urn urn(String s) {
@@ -51,8 +53,12 @@ class OwnershipInstrumentationTest {
     void setUp() throws Exception {
         groups = mock(CachedGroupResolver.class);
         admins = new AdminBypass(Set.of(datahub), Set.of());
+        accessResolver = mock(DomainPlatformAccessResolver.class);
+        when(accessResolver.resolve(any(), any(), any()))
+                .thenReturn(new DomainPlatformAccessResolver.AccessSets(
+                        Set.of("urn:li:domain:CBP"), Set.of("urn:li:dataPlatform:mysql")));
         instrumentation = new OwnershipInstrumentation(
-                new OwnershipFilterBuilder(), new FieldArgumentMutators(), groups, admins);
+                new OwnershipFilterBuilder(), new FieldArgumentMutators(), groups, admins, accessResolver);
 
         when(groups.groupsFor(any(), eq(alice))).thenReturn(List.of(g1));
         when(groups.groupsFor(any(), eq(bob))).thenReturn(List.of());
@@ -119,7 +125,7 @@ class OwnershipInstrumentationTest {
         when(failingGroups.groupsFor(any(), any())).thenThrow(boom);
 
         OwnershipInstrumentation inst = new OwnershipInstrumentation(
-                new OwnershipFilterBuilder(), new FieldArgumentMutators(), failingGroups, admins);
+                new OwnershipFilterBuilder(), new FieldArgumentMutators(), failingGroups, admins, accessResolver);
 
         DataFetcher<?> wrapped = inst.instrumentDataFetcher(
                 env -> "should not be called",
@@ -152,7 +158,7 @@ class OwnershipInstrumentationTest {
     }
 
     @Test
-    void skipsFilteringForStructuralOnlyQuery() throws Exception {
+    void scopesDomainSearchToAccessibleSet() throws Exception {
         AtomicReference<Map<String, Object>> seen = new AtomicReference<>();
         DataFetcher<?> capturing = env -> {
             seen.set(new LinkedHashMap<>((Map<String, Object>) env.getArgument("input")));
@@ -163,9 +169,31 @@ class OwnershipInstrumentationTest {
 
         Map<String, Object> input = baseInput();
         input.put("types", List.of("DOMAIN"));
-        wrapped.get(envFor(alice, input)); // alice is a non-admin
+        wrapped.get(envFor(alice, input)); // alice is a non-admin; accessible domains = {CBP}
 
-        // Structural-only query is passed through untouched — cards/results still render.
+        // Domain search is restricted to the accessible domain URNs (urn IN [...]).
+        List<Map<String, Object>> orFilters = (List<Map<String, Object>>) seen.get().get("orFilters");
+        assertThat(orFilters).hasSize(1);
+        Map<String, Object> crit = ((List<Map<String, Object>>) orFilters.get(0).get("and")).get(0);
+        assertThat(crit.get("field")).isEqualTo("urn");
+        assertThat((List<String>) crit.get("values")).containsExactly("urn:li:domain:CBP");
+    }
+
+    @Test
+    void exemptsGlossaryAndTagQueries() throws Exception {
+        AtomicReference<Map<String, Object>> seen = new AtomicReference<>();
+        DataFetcher<?> capturing = env -> {
+            seen.set(new LinkedHashMap<>((Map<String, Object>) env.getArgument("input")));
+            return null;
+        };
+        DataFetcher<?> wrapped = instrumentation.instrumentDataFetcher(capturing,
+                fieldFetchParams("searchAcrossEntities"), null);
+
+        Map<String, Object> input = baseInput();
+        input.put("types", List.of("GLOSSARY_TERM"));
+        wrapped.get(envFor(alice, input));
+
+        // Glossary/tags are always visible — no filter injected.
         assertThat(seen.get().get("orFilters")).isNull();
     }
 
