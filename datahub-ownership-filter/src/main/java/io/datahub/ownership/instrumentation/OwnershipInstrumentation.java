@@ -89,9 +89,15 @@ public class OwnershipInstrumentation extends SimplePerformantInstrumentation {
         return env -> intercept(dataFetcher, env, fieldName);
     }
 
+    @SuppressWarnings("deprecation")
     private Object intercept(DataFetcher<?> original, DataFetchingEnvironment env, String fieldName)
             throws Exception {
+        // QueryContext placement varies by DataHub version: newer builds put it in the GraphQL
+        // context map; v1.3.x attaches it as the (legacy) DataFetchingEnvironment context. Read both.
         QueryContext qc = env.getGraphQlContext().get(QueryContext.class);
+        if (qc == null && env.getContext() instanceof QueryContext legacyCtx) {
+            qc = legacyCtx;
+        }
         if (qc == null) {
             log.warn("OwnershipInstrumentation: no QueryContext on field {}; passing through", fieldName);
             return original.get(env);
